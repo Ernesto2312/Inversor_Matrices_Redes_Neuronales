@@ -1,0 +1,340 @@
+\documentclass[12pt,a4paper]{article}
+
+\usepackage[utf8]{inputenc}
+\usepackage[T1]{fontenc}
+\usepackage[spanish]{babel}
+\usepackage{amsmath}
+\usepackage{amssymb}
+\usepackage{geometry}
+\usepackage{enumitem}
+
+\geometry{margin=2.5cm}
+
+\title{\textbf{Inversor de Matrices mediante Red Neuronal\\ y Refinamiento Algebraico}}
+\author{Ernesto Javier Quintana Hernández}
+\date{\today}
+
+\begin{document}
+
+\begin{titlepage}
+\centering
+\vspace*{1cm}
+{\large Universidad de Pinar del Río \\ ``Hermanos Saíz Montes de Oca''\par}
+\vspace{0.5cm}
+{\large Facultad de Ciencias Técnicas \par}
+\vspace{2cm}
+
+{\Huge\bfseries Inversor de Matrices mediante Red Neuronal y Refinamiento Algebraico\par}
+\vspace{2cm}
+
+{\Large Informe Técnico\par}
+\vspace{1cm}
+
+{\large Asignatura: Matemática Numérica (Cálculo IV) \par}
+\vspace{0.3cm}
+\vspace{2cm}
+
+{\Large\itshape Ernesto Javier Quintana Hernández\par}
+\vspace{1cm}
+
+\vfill
+{\large \today\par}
+\end{titlepage}
+
+\tableofcontents
+\newpage
+
+% ============================================================
+\section{Planteamiento del problema y selección de la solución}
+% ============================================================
+
+\subsection{El problema}
+
+El cálculo de la matriz inversa es una operación fundamental en álgebra lineal, con aplicaciones en sistemas de ecuaciones, transformaciones geométricas y métodos numéricos en general. Los métodos clásicos para esta tarea --- como la eliminación de Gauss-Jordan --- son algoritmos deterministas y exactos (salvo el error de redondeo inherente a la aritmética de punto flotante), pero rígidos: ejecutan siempre la misma secuencia de pasos algebraicos, sin posibilidad de aprender patrones o adaptarse mediante datos. El presente proyecto explora una alternativa: un sistema que combina una red neuronal con métodos algebraicos iterativos para aproximar la inversa de una matriz, evaluando bajo qué condiciones esa aproximación es confiable y cómo garantizar su precisión en todos los casos.
+
+\subsection{Solución seleccionada}
+
+El sistema desarrollado combina tres componentes que trabajan en conjunto:
+
+\begin{enumerate}
+    \item \textbf{Una red neuronal multicapa (MLP)}, especializada en el dominio de matrices bien condicionadas (número de condición menor a 10), que recibe la matriz aplanada como entrada y produce una aproximación inicial de su inversa.
+
+    \item \textbf{Una inicialización algebraica clásica de respaldo}, basada en la fórmula
+    \[
+        X_0 = \frac{A^T}{\|A\|_1 \cdot \|A\|_\infty},
+    \]
+    que garantiza matemáticamente un punto de partida válido para matrices fuera del dominio de especialización de la red (números de condición entre 10 y 50).
+
+    \item \textbf{El método iterativo de Newton-Schulz},
+    \[
+        X_{k+1} = X_k(2I - AX_k),
+    \]
+    que refina cualquiera de los dos puntos de partida anteriores hasta alcanzar precisión de máquina, mediante convergencia cuadrática.
+\end{enumerate}
+
+El sistema decide automáticamente, para cada matriz, cuál de los dos puntos de partida (red o algebraico) usar, según una condición matemática verificable en tiempo real: si la aproximación de la red ya garantiza la convergencia de Newton-Schulz, se usa; si no, se recurre al respaldo algebraico, que siempre la garantiza.
+
+Esta combinación resuelve el problema porque aprovecha lo mejor de cada componente: la red aporta velocidad y un enfoque basado en datos en el caso típico, mientras que el respaldo algebraico y el refinamiento iterativo aportan la garantía formal de precisión que una red neuronal, por sí sola, no puede ofrecer de forma consistente.
+
+\subsection{Ventajas frente a otros métodos computacionales}
+
+Comparado con Gauss-Jordan puro, el sistema propuesto introduce un componente aprendido y diferenciable que podría integrarse en pipelines de aprendizaje automático más amplios (algo que un algoritmo de eliminación rígido no permite), sin sacrificar precisión final, ya que el refinamiento algebraico garantiza el mismo orden de exactitud. Adicionalmente, el método de Newton-Schulz se basa únicamente en multiplicaciones de matrices, sin calcular determinantes ni cofactores de forma explícita, lo que favorece su paralelización en hardware vectorizado (GPU).
+
+Comparado con un enfoque de red neuronal pura, sin refinamiento algebraico posterior, el sistema final garantiza una precisión consistente (del orden de $10^{-6}$ a $10^{-7}$) en el 100\% de los casos evaluados, en lugar de depender únicamente de qué tan bien generalizó la red a una matriz específica.
+
+\subsection{Proceso de refinamiento iterativo}
+
+El sistema final no fue la primera implementación, sino el resultado de un proceso de experimentación, diagnóstico y corrección, resumido en la siguiente secuencia:
+
+\begin{description}[leftmargin=0pt, style=nextline]
+    \item[Paso 1 --- Primera versión: regresión directa.] Se entrenó una red neuronal multicapa (MLP) para predecir directamente los valores numéricos de la inversa, comparando su salida contra la inversa real mediante el error cuadrático medio (MSE). La pérdida de entrenamiento mostraba una disminución consistente, lo que en una primera instancia sugería un aprendizaje correcto.
+
+    \item[Paso 2 --- Diagnóstico: sobreajuste (\textit{overfitting}).] Al introducir una partición de datos de prueba (\textit{train/test split}) --- un conjunto de matrices nunca visto durante el entrenamiento --- se encontró que el error en datos nuevos era hasta 190 veces mayor que el error de entrenamiento. Esto evidenció que el modelo memorizaba las matrices específicas del conjunto de entrenamiento en lugar de generalizar la relación entre una matriz y su inversa.
+
+    \item[Paso 3 --- Identificación de la causa raíz.] Se determinó que el problema no era exclusivamente de metodología (falta de validación), sino también de la naturaleza del objetivo de entrenamiento: los valores de una matriz inversa pueden alcanzar magnitudes extremas según el condicionamiento de la matriz original (se observaron valores superiores a 2600 en un dataset con matrices de condicionamiento moderado), lo cual vuelve numéricamente inestable la regresión directa sobre esos valores.
+
+    \item[Paso 4 --- Rediseño de la función de pérdida.] Se sustituyó la comparación directa contra la inversa real por una pérdida algebraica y auto-supervisada: $\|A \cdot X - I\|^2$, donde $X$ es la salida de la red. Este cambio mantiene siempre un objetivo acotado (la identidad), independientemente del condicionamiento de $A$, y no requiere conocer la inversa real durante el entrenamiento.
+
+    \item[Paso 5 --- Incorporación de refinamiento iterativo (Newton-Schulz).] Se identificó que la cantidad minimizada por la nueva función de pérdida ($\|I - AX\|$) coincide exactamente con la condición de convergencia del método de Newton-Schulz. Sin embargo, las pruebas mostraron que la confiabilidad de este refinamiento, partiendo únicamente de la predicción de la red, era inconsistente fuera de un dominio acotado de matrices.
+
+    \item[Paso 6 --- Especialización del dominio de la red.] Se comparó el desempeño de la red entrenada sobre un dominio amplio (número de condición hasta 50) contra un dominio restringido (número de condición hasta 10). Se determinó experimentalmente --- incluyendo pruebas con redes de mayor capacidad y conjuntos de entrenamiento más grandes, que no mostraron mejoras significativas --- que la red generaliza de forma confiable únicamente dentro del dominio restringido.
+
+    \item[Paso 7 --- Incorporación de un respaldo algebraico garantizado.] Para los casos fuera del dominio de especialización de la red, se incorporó una inicialización algebraica clásica que garantiza matemáticamente la convergencia de Newton-Schulz, independientemente del condicionamiento de la matriz. El sistema decide entre ambos puntos de partida evaluando, para cada matriz individual, si la predicción de la red satisface la condición teórica de convergencia.
+
+    \item[Paso 8 --- Validación final.] El sistema resultante fue evaluado sobre matrices nuevas en ambos regímenes (bien condicionadas y mal condicionadas), alcanzando una tasa de éxito del 100\%, con errores finales del orden de $10^{-6}$ a $10^{-7}$ respecto a la inversa calculada por métodos exactos.
+\end{description}
+
+A partir de esta versión final del sistema, la siguiente sección detalla los fundamentos matemáticos de cada uno de sus componentes.
+
+% ============================================================
+\section{Fundamento matemático de la red neuronal}
+% ============================================================
+
+\subsection{Composición de funciones}
+
+Una red neuronal multicapa es, formalmente, una composición de funciones: cada capa transforma su entrada mediante una función, y la salida de una capa es la entrada de la siguiente. Definiendo cada capa de la red utilizada como una función:
+
+\begin{align*}
+    f_1(x) &= \mathrm{ReLU}(W_1x + b_1) \quad [16 \to 128] \\
+    f_2(x) &= \mathrm{ReLU}(W_2x + b_2) \quad [128 \to 256] \\
+    f_3(x) &= \mathrm{ReLU}(W_3x + b_3) \quad [256 \to 128] \\
+    f_4(x) &= W_4x + b_4 \quad [128 \to 16]
+\end{align*}
+
+la red completa se expresa como:
+
+\[
+    \mathrm{Red}(x) = f_4(f_3(f_2(f_1(x)))) = (f_4 \circ f_3 \circ f_2 \circ f_1)(x)
+\]
+
+Esta perspectiva no es solo notacional: explica por qué la no linealidad es indispensable. Si se omitieran las funciones de activación, la composición de las transformaciones lineales restantes seguiría siendo, ella misma, una única transformación lineal:
+
+\[
+    W_4(W_3(W_2(W_1x))) = (W_4W_3W_2W_1)\,x
+\]
+
+Es decir, sin no linealidades intermedias, cuatro capas serían matemáticamente equivalentes a una sola, sin ninguna ganancia de capacidad representacional por la profundidad añadida. Adicionalmente, esta estructura de composición es la razón por la cual el algoritmo de entrenamiento requiere la regla de la cadena del cálculo diferencial: el gradiente del error respecto a los pesos de las primeras capas se calcula propagando derivadas hacia atrás a través de cada función de la composición (de ahí el nombre \textit{backpropagation}).
+
+\subsection{Función de activación: ReLU}
+
+Se utilizó la función \textit{Rectified Linear Unit} (ReLU), definida como:
+
+\[
+    \mathrm{ReLU}(z) = \max(0, z)
+\]
+
+Esta función fue seleccionada por tres razones:
+
+\begin{enumerate}
+    \item \textbf{Bajo costo computacional}: requiere solo una comparación, frente a funciones como sigmoide o tangente hiperbólica, que requieren evaluar exponenciales.
+    \item \textbf{Mitigación del problema del gradiente que se desvanece} (\textit{vanishing gradient}): para valores positivos, la derivada de ReLU es constante e igual a 1, lo cual evita que el gradiente se atenúe excesivamente al propagarse hacia atrás a través de varias capas --- un problema frecuente con sigmoide/tanh en redes de varias capas.
+    \item \textbf{Desempeño empírico}: es la función de activación estándar en arquitecturas de tipo MLP para tareas de regresión no lineal.
+\end{enumerate}
+
+\subsection{Cantidad de neuronas y capas}
+
+Las capas de entrada (16) y salida (16) no son un parámetro de diseño, sino una consecuencia directa del problema: una matriz de $4\times4$ aplanada tiene exactamente $n^2 = 16$ componentes, tanto en la entrada (la matriz $A$) como en la salida (la aproximación de $A^{-1}$).
+
+Las capas ocultas (128, 256, 128) siguen un patrón de expansión y posterior compresión:
+
+\[
+    16 \to 128 \to 256 \to 128 \to 16
+\]
+
+La expansión inicial provee a la red mayor capacidad de representación --- más combinaciones lineales distintas de las 16 entradas --- necesaria porque la inversión de matrices involucra relaciones no lineales complejas entre todos los elementos de la matriz (determinantes, cofactores). La compresión posterior reduce gradualmente la dimensionalidad hacia el tamaño de salida requerido, evitando una transición abrupta.
+
+Los valores específicos (128, 256) siguen la convención estándar de usar potencias de 2, y fueron validados empíricamente: arquitecturas más pequeñas mostraron capacidad insuficiente para reducir adecuadamente el error, mientras que arquitecturas sustancialmente más grandes, evaluadas durante el proceso de refinamiento del sistema, no produjeron mejoras significativas en la generalización del modelo, dado el tamaño relativamente acotado del problema (16 entradas).
+
+\subsection{Tipo de enlace entre neuronas: capas totalmente conectadas}
+
+Se utilizaron capas totalmente conectadas (\textit{fully connected} / densas), en las que cada neurona de una capa se conecta con todas las neuronas de la capa siguiente. Esto se expresa, en cada capa, como la operación matricial:
+
+\[
+    \vec{z} = W\vec{x} + \vec{b}
+\]
+
+donde cada fila de $W$ contiene los pesos de una neurona distinta, conectada a la totalidad de las entradas recibidas.
+
+Esta elección se justifica por la naturaleza del problema: la alternativa más común a este tipo de enlace --- las conexiones convolucionales, donde cada neurona de salida se conecta solo a una vecindad local de la entrada --- resulta apropiada cuando existe una relación de proximidad espacial entre los datos (como en imágenes, donde píxeles cercanos están relacionados). En el caso de una matriz aplanada, no existe tal noción de vecindad relevante: el cálculo de un cofactor o del determinante combina elementos de la matriz sin importar su posición relativa en el arreglo aplanado. Restringir las conexiones a vecindades locales impediría a la red aprender relaciones entre elementos distantes en el vector aplanado pero relevantes en términos matriciales. Las conexiones totalmente conectadas no imponen ninguna suposición de localidad, permitiendo que cada neurona combine cualquier subconjunto de las 16 entradas.
+
+\subsection{Matemática del refinamiento algebraico}
+
+Una vez obtenido un punto de partida $X_0$ (ya sea desde la red neuronal o desde la inicialización algebraica de respaldo), el sistema lo refina mediante el método de Newton-Schulz, hasta alcanzar precisión de máquina.
+
+\subsubsection{Iteración de Newton-Schulz y convergencia cuadrática}
+
+El método itera la siguiente expresión:
+
+\[
+    X_{k+1} = X_k(2I - AX_k)
+\]
+
+Para entender por qué esto converge, y qué tan rápido, se define el residuo en cada paso como:
+
+\[
+    E_k = I - AX_k
+\]
+
+Si $E_k = 0$, entonces $X_k = A^{-1}$ exactamente. El objetivo es entonces mostrar que $E_k \to 0$.
+
+Calculando el residuo en el paso siguiente:
+
+\[
+    E_{k+1} = I - AX_{k+1} = I - AX_k(2I-AX_k) = I - 2AX_k + (AX_k)^2
+\]
+
+Y notando que:
+
+\[
+    (I - AX_k)^2 = I - 2AX_k + (AX_k)^2
+\]
+
+se obtiene la relación central del método:
+
+\[
+    \boxed{E_{k+1} = E_k^2}
+\]
+
+Es decir: el residuo se eleva al cuadrado en cada iteración. Tomando normas:
+
+\[
+    \|E_{k+1}\| = \|E_k^2\| \leq \|E_k\|^2
+\]
+
+Esto significa que si en algún punto $\|E_0\| = \epsilon < 1$, entonces:
+
+\[
+    \|E_1\| \leq \epsilon^2, \quad \|E_2\| \leq \epsilon^4, \quad \|E_3\| \leq \epsilon^8, \quad \dots, \quad \|E_k\| \leq \epsilon^{2^k}
+\]
+
+El exponente se duplica en cada paso --- esta es la convergencia cuadrática: el número de cifras decimales correctas se duplica en cada iteración. Por ejemplo, con $\epsilon = 0.5$: $0.5 \to 0.25 \to 0.0625 \to 0.0039 \to 0.000015 \to \dots$, alcanzando precisión de máquina ($\sim10^{-7}$) en apenas 5-6 iteraciones.
+
+Esta misma relación explica por qué la condición de convergencia es $\|E_0\| < 1$: si $\epsilon \geq 1$, la secuencia $\epsilon^{2^k}$ no decrece (e incluso puede crecer si $\epsilon>1$), y el método diverge --- exactamente el comportamiento observado experimentalmente al usar puntos de partida de baja calidad.
+
+\subsubsection{Inicialización algebraica segura: por qué garantiza la convergencia}
+
+Para los casos en que la red neuronal no provee un punto de partida confiable, se utiliza:
+
+\[
+    X_0 = \frac{A^T}{\|A\|_1 \cdot \|A\|_\infty}
+\]
+
+\textbf{Demostración de que esto garantiza $\|E_0\|_2 < 1$:}
+
+Sea $c = \|A\|_1\|A\|_\infty$. El producto $AX_0 = \dfrac{AA^T}{c}$ es una matriz simétrica (ya que $AA^T$ siempre lo es), cuyos valores propios son $\dfrac{\sigma_i^2}{c}$, donde $\sigma_i$ son los valores singulares de $A$ (todos positivos, pues $A$ es invertible).
+
+Por una desigualdad clásica de álgebra lineal numérica, la norma espectral de cualquier matriz satisface:
+
+\[
+    \|A\|_2 \leq \sqrt{\|A\|_1 \cdot \|A\|_\infty} = \sqrt{c}
+\]
+
+Como $\|A\|_2 = \sigma_{max}$ (el mayor valor singular), se obtiene $\sigma_{max}^2 \leq c$, es decir:
+
+\[
+    \frac{\sigma_{max}^2}{c} \leq 1
+\]
+
+Por lo tanto, todos los valores propios de $AX_0$ están en el intervalo $(0, 1]$, y en consecuencia, los valores propios de $E_0 = I - AX_0$ están en:
+
+\[
+    \left[\,1 - \frac{\sigma_{max}^2}{c},\; 1 - \frac{\sigma_{min}^2}{c}\,\right] \subset [0, 1)
+\]
+
+(el límite inferior es $\geq 0$ por la desigualdad anterior, y el límite superior es $<1$ porque $\sigma_{min}^2 > 0$ al ser $A$ invertible). Como $E_0$ es simétrica, su norma espectral es igual a su radio espectral, por lo que:
+
+\[
+    \|E_0\|_2 < 1 \quad \text{siempre, sin importar el condicionamiento de } A
+\]
+
+Esto demuestra formalmente por qué esta inicialización funciona como respaldo confiable para cualquier matriz invertible, sin excepción.
+
+% ============================================================
+\section{Herramientas de implementación}
+% ============================================================
+
+\subsection{Lenguaje de programación: Python}
+
+Se utilizó Python como lenguaje de implementación, por las siguientes razones:
+
+\begin{enumerate}
+    \item \textbf{Ecosistema científico y numérico maduro}: Python cuenta con un soporte extenso y estandarizado para cómputo numérico y aprendizaje automático (NumPy, PyTorch, SciPy), lo cual evita tener que implementar desde cero operaciones de álgebra lineal ya optimizadas y verificadas (descomposición en valores singulares, normas matriciales, multiplicación de matrices, etc.).
+
+    \item \textbf{Sintaxis concisa para prototipado}: la naturaleza experimental de este proyecto --- que requirió iterar varias veces sobre la arquitectura, la función de pérdida y la lógica de decisión del sistema híbrido --- se beneficia de un lenguaje de alto nivel donde los cambios se implementan y prueban rápidamente.
+
+    \item \textbf{Estándar de facto en la comunidad de aprendizaje automático}: la mayoría de los \textit{frameworks} de redes neuronales (PyTorch, TensorFlow, JAX) están diseñados primariamente para Python, lo que garantiza documentación, soporte y ejemplos abundantes.
+\end{enumerate}
+
+Se descartó una implementación en Java (lenguaje también utilizado en otras asignaturas de la carrera) debido a la ausencia de un \textit{framework} de diferenciación automática con el mismo nivel de madurez y adopción que los disponibles en Python.
+
+\subsection{Framework: PyTorch}
+
+Dentro del ecosistema de Python, se seleccionó PyTorch como \textit{framework} principal, por las siguientes razones específicas al proyecto:
+
+\begin{enumerate}
+    \item \textbf{Diferenciación automática (\textit{autograd})}: el entrenamiento de la red neuronal requiere calcular, en cada iteración, el gradiente de la función de pérdida respecto a decenas de miles de parámetros (pesos y sesgos). PyTorch calcula estos gradientes automáticamente mediante \texttt{backward()}, construyendo un grafo computacional dinámico durante la ejecución, sin que sea necesario derivar manualmente estas expresiones.
+
+    \item \textbf{Soporte unificado para ambos componentes del sistema híbrido}: PyTorch no se utilizó únicamente para la red neuronal. El módulo \texttt{torch.linalg} se empleó también para los cálculos puramente algebraicos del proyecto --- número de condición (\texttt{torch.linalg.cond}), normas matriciales (\texttt{torch.linalg.matrix\_norm}) para la inicialización segura, y la inversa de referencia (\texttt{torch.inverse}) usada para validar los resultados. Esto permitió implementar el sistema completo --- componente aprendido y componente algebraico --- dentro de un único entorno coherente, sin necesidad de bibliotecas adicionales.
+
+    \item \textbf{Abstracciones de alto nivel para la arquitectura}: el módulo \texttt{torch.nn} (en particular \texttt{nn.Module}, \texttt{nn.Linear}, \texttt{nn.Sequential}) permite declarar la arquitectura de la red de forma legible y modular, y provee automáticamente el seguimiento de todos los parámetros entrenables, necesario para que el optimizador pueda actualizarlos.
+
+    \item \textbf{Optimizadores estándar incluidos}: se utilizó el optimizador Adam (\texttt{torch.optim.Adam}), incluido nativamente en el \textit{framework}, el cual ajusta de forma adaptativa la tasa de aprendizaje de cada parámetro durante el entrenamiento.
+\end{enumerate}
+
+% ============================================================
+\section{Conclusiones generales de los resultados}
+% ============================================================
+
+\subsection{Síntesis de los resultados obtenidos}
+
+El sistema final fue evaluado sobre 20 matrices nuevas, generadas aleatoriamente y nunca utilizadas durante el entrenamiento, divididas en dos regímenes: 10 matrices bien condicionadas ($\mathrm{cond} < 10$) y 10 matrices más difíciles ($10 \leq \mathrm{cond} < 50$). En ambos regímenes se obtuvo una tasa de éxito del 100\% (20/20), con un error final, respecto a la inversa de referencia calculada por métodos exactos, del orden de $10^{-6}$ a $10^{-7}$ --- comparable a la precisión de máquina alcanzable por la aritmética de punto flotante utilizada.
+
+La distribución del origen de la aproximación inicial confirmó el comportamiento esperado por diseño: en el régimen de matrices bien condicionadas, la red neuronal proveyó un punto de partida confiable en aproximadamente el 60-70\% de los casos; en el régimen de matrices más difíciles, fuera de su dominio de especialización, ese porcentaje se redujo a aproximadamente el 30\%, recayendo el sistema en la inicialización algebraica garantizada en el resto de los casos. En ningún caso, de ningún régimen, el sistema completo dejó de converger a alta precisión.
+
+\subsection{Lecciones metodológicas}
+
+El resultado más significativo de este proyecto no es únicamente la precisión final alcanzada, sino el proceso que condujo a ella, descrito en la Sección 1.4. En particular:
+
+\begin{itemize}
+    \item \textbf{La validación con datos no vistos (\textit{train/test split}) fue indispensable.} Una primera versión del sistema mostraba una pérdida de entrenamiento aparentemente satisfactoria, pero un error casi 190 veces mayor sobre datos nuevos --- un sobreajuste que habría pasado inadvertido sin esta práctica de validación.
+
+    \item \textbf{El diseño de la función de pérdida resultó tan determinante como la arquitectura de la red.} El cambio de una pérdida de regresión directa a una pérdida algebraica auto-supervisada no solo mejoró la generalización, sino que habilitó la integración con el método de refinamiento posterior, al alinear el objetivo de entrenamiento con la condición matemática de convergencia de Newton-Schulz.
+
+    \item \textbf{Una red neuronal no garantiza, por sí sola, precisión numérica consistente.} Este hallazgo, contrastado con la intuición inicial del proyecto, evidencia que los métodos de aprendizaje automático y los métodos algebraicos clásicos no son necesariamente competidores, sino que pueden complementarse: la red aporta una aproximación eficiente en su dominio de validez, mientras que el componente algebraico aporta la garantía formal que la red no puede ofrecer por construcción.
+\end{itemize}
+
+\subsection{Limitaciones del sistema}
+
+El sistema desarrollado presenta las siguientes limitaciones, relevantes para interpretar correctamente el alcance de los resultados:
+
+\begin{itemize}
+    \item \textbf{Tamaño de matriz fijo.} La arquitectura fue diseñada específicamente para matrices de $4\times4$ (16 entradas/salidas); extenderla a otros tamaños requeriría reentrenar una red con una arquitectura distinta.
+    \item \textbf{Dominio de validación acotado.} El sistema fue evaluado para matrices con número de condición de hasta 50. Matrices con condicionamiento extremadamente alto (cercanas a la singularidad) no fueron evaluadas, y la inicialización de respaldo, si bien teóricamente garantizada, podría requerir más iteraciones de Newton-Schulz para converger en esos casos.
+    \item \textbf{Matrices densas, no estructuradas.} El conjunto de entrenamiento se generó mediante muestreo aleatorio denso (\texttt{torch.randn}); el comportamiento del sistema sobre matrices con estructura particular (por ejemplo, matrices con muchos elementos nulos) no fue evaluado de forma específica.
+\end{itemize}
+
+\subsection{Conclusión general}
+
+El proyecto demuestra que es posible construir un sistema confiable para la inversión numérica de matrices combinando un componente de aprendizaje automático con métodos algebraicos clásicos, sin que ninguno de los dos enfoques, por separado, sea suficiente: la red neuronal, evaluada de forma aislada, mostró limitaciones reales de precisión y generalización; los métodos puramente algebraicos de inicialización, aunque siempre confiables, no aprovechan ningún patrón aprendido de los datos. La arquitectura híbrida final integra ambas perspectivas, alcanzando una precisión consistente y matemáticamente respaldada en la totalidad de los casos evaluados.
+
+\end{document}
